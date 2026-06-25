@@ -12,7 +12,7 @@ import uuid
 import hashlib
 from datetime import datetime
 import numpy as np
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import google.generativeai as genai
@@ -20,8 +20,20 @@ import google.generativeai as genai
 # ============================================================
 # CONFIGURATION
 # ============================================================
-app = Flask(__name__)
+app = Flask(__name__, static_folder='../frontend/build', static_url_path='/')
 CORS(app)
+
+# Serve React frontend
+@app.route('/')
+def serve():
+    return send_from_directory(app.static_folder, 'index.html')
+
+@app.route('/<path:path>')
+def static_proxy(path):
+    try:
+        return send_from_directory(app.static_folder, path)
+    except:
+        return send_from_directory(app.static_folder, 'index.html')
 
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -433,6 +445,9 @@ def health_check():
     return jsonify({"status": "running", "service": "NeoMind AI Backend v2.0", "gemini_configured": GEMINI_API_KEY != "YOUR_API_KEY_HERE"})
 
 
+# ============================================================
+# INIT
+# ============================================================
 if __name__ == '__main__':
     print("\n" + "="*60)
     print("  NeoMind AI Backend Server v2.0")
