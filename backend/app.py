@@ -1,7 +1,7 @@
 """
 NeoMind Backend - AI-Based Early Detection of Neurodevelopmental Disorders
 Uses Google Gemini AI + Pre-trained models for analysis
-Version 2.0 - Added Chatbot, Parent Portal, Doctor Portal, Doctor Directory
+Version 3.0 - Added PostgreSQL Database (persistent storage)
 """
 
 import os
@@ -14,6 +14,7 @@ from datetime import datetime
 import numpy as np
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
 import google.generativeai as genai
 
@@ -26,6 +27,16 @@ CORS(app)
 UPLOAD_FOLDER = tempfile.mkdtemp()
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
+
+# ---- DATABASE CONFIG ----
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+# Render gives URLs starting with postgres:// but SQLAlchemy needs postgresql://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
 
 # Configure Gemini AI
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
@@ -41,36 +52,118 @@ def allowed_file(filename, allowed_extensions):
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
+
 # ============================================================
-# IN-MEMORY DATABASE (for demo)
+# DATABASE MODELS
 # ============================================================
-users_db = {
-    "parent@demo.com": {
-        "id": "p-001", "email": "parent@demo.com",
-        "password": hash_password("parent123"),
-        "name": "Demo Parent", "role": "parent",
-        "babies": ["b-001"], "created_at": "2026-01-01"
-    },
-    "doctor@demo.com": {
-        "id": "d-001", "email": "doctor@demo.com",
-        "password": hash_password("doctor123"),
-        "name": "Dr. Sharma", "role": "doctor",
-        "specialization": "Pediatric Neurologist",
-        "hospital": "Apollo Children's Hospital",
-        "created_at": "2026-01-01"
-    }
-}
 
-babies_db = {
-    "b-001": {
-        "id": "b-001", "name": "Baby Arjun", "parent_id": "p-001",
-        "dob": "2026-02-15", "gender": "Male", "created_at": "2026-02-15"
-    }
-}
+class User(db.Model):
+    __tablename__ = 'users'
+    id          = db.Column(db.String(50),  primary_key=True)
+    email       = db.Column(db.String(255), unique=True, nullable=False)
+    password    = db.Column(db.String(255), nullable=False)
+    name        = db.Column(db.String(255), nullable=False)
+    role        = db.Column(db.String(50),  default='parent')
+    specialization = db.Column(db.String(255), nullable=True)
+    hospital    = db.Column(db.String(255), nullable=True)
+    created_at  = db.Column(db.String(50),  default=lambda: datetime.now().isoformat())
 
-results_db = {}
-chat_history_db = {}
+    babies      = db.relationship('Baby', backref='parent', lazy=True)
 
+    def to_dict(self, include_password=False):
+        d = {
+            "id": self.id, "email": self.email, "name": self.name,
+            "role": self.role, "created_at": self.created_at
+        }
+        if self.role == "doctor":
+            d["specialization"] = self.specialization
+            d["hospital"] = self.hospital
+        if include_password:
+            d["password"] = self.password
+        return d
+
+
+class Baby(db.Model):
+    __tablename__ = 'babies'
+    id         = db.Column(db.String(50),  primary_key=True)
+    name       = db.Column(db.String(255), nullable=False)
+    parent_id  = db.Column(db.String(50),  db.ForeignKey('users.id'), nullable=False)
+    dob        = db.Column(db.String(50),  nullable=True)
+    gender     = db.Column(db.String(50),  nullable=True)
+    created_at = db.Column(db.String(50),  default=lambda: datetime.now().isoformat())
+
+    results    = db.relationship('Result', backref='baby', lazy=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "name": self.name, "parent_id": self.parent_id,
+            "dob": self.dob, "gender": self.gender, "created_at": self.created_at
+        }
+
+
+class Result(db.Model):
+    __tablename__ = 'results'
+    id         = db.Column(db.String(50),  primary_key=True)
+    baby_id    = db.Column(db.String(50),  db.ForeignKey('babies.id'), nullable=False)
+    type       = db.Column(db.String(100), nullable=False)
+    data       = db.Column(db.Text,        nullable=True)   # JSON stored as text
+    timestamp  = db.Column(db.String(50),  default=lambda: datetime.now().isoformat())
+
+    def to_dict(self):
+        try:
+            data_parsed = json.loads(self.data) if self.data else {}
+        except Exception:
+            data_parsed = {}
+        return {
+            "id": self.id, "baby_id": self.baby_id,
+            "type": self.type, "data": data_parsed, "timestamp": self.timestamp
+        }
+
+
+# ============================================================
+# SEED DEMO ACCOUNTS ON FIRST RUN
+# ============================================================
+
+def seed_demo_data():
+    """Insert demo accounts if they don't exist yet."""
+    if not User.query.filter_by(email="parent@demo.com").first():
+        parent = User(
+            id="p-001", email="parent@demo.com",
+            password=hash_password("parent123"),
+            name="Demo Parent", role="parent", created_at="2026-01-01"
+        )
+        db.session.add(parent)
+
+    if not User.query.filter_by(email="doctor@demo.com").first():
+        doctor = User(
+            id="d-001", email="doctor@demo.com",
+            password=hash_password("doctor123"),
+            name="Dr. Sharma", role="doctor",
+            specialization="Pediatric Neurologist",
+            hospital="Apollo Children's Hospital",
+            created_at="2026-01-01"
+        )
+        db.session.add(doctor)
+
+    if not Baby.query.filter_by(id="b-001").first():
+        baby = Baby(
+            id="b-001", name="Baby Arjun", parent_id="p-001",
+            dob="2026-02-15", gender="Male", created_at="2026-02-15"
+        )
+        db.session.add(baby)
+
+    db.session.commit()
+
+
+# Create all tables and seed demo data when app starts
+with app.app_context():
+    db.create_all()
+    seed_demo_data()
+
+
+# ============================================================
+# DOCTORS DIRECTORY (static list — no DB needed)
+# ============================================================
 doctors_directory = [
     {"id": "doc-1", "name": "Dr. Priya Sharma", "specialization": "Pediatric Neurologist", "hospital": "Apollo Children's Hospital", "city": "Hyderabad", "phone": "+91-40-2345-6789", "email": "priya.sharma@apollo.com", "experience": "15 years", "rating": 4.8, "available": True, "address": "Jubilee Hills, Hyderabad, Telangana", "consultation_fee": "Rs.1,500", "timings": "Mon-Sat: 9:00 AM - 5:00 PM"},
     {"id": "doc-2", "name": "Dr. Rajesh Kumar", "specialization": "Developmental Pediatrician", "hospital": "Rainbow Children's Hospital", "city": "Hyderabad", "phone": "+91-40-3456-7890", "email": "rajesh.kumar@rainbow.com", "experience": "12 years", "rating": 4.7, "available": True, "address": "Banjara Hills, Hyderabad, Telangana", "consultation_fee": "Rs.1,200", "timings": "Mon-Fri: 10:00 AM - 6:00 PM"},
@@ -86,57 +179,61 @@ doctors_directory = [
 # ============================================================
 # AUTH ENDPOINTS
 # ============================================================
+
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     try:
         data = request.get_json()
-        email = data.get('email', '').lower().strip()
+        email    = data.get('email', '').lower().strip()
         password = data.get('password', '')
-        name = data.get('name', '')
-        role = data.get('role', 'parent')
+        name     = data.get('name', '')
+        role     = data.get('role', 'parent')
 
         if not email or not password or not name:
             return jsonify({"error": "Name, email and password are required"}), 400
-        if email in users_db:
+
+        if User.query.filter_by(email=email).first():
             return jsonify({"error": "Email already registered"}), 400
 
         user_id = f"{'p' if role == 'parent' else 'd'}-{str(uuid.uuid4())[:8]}"
-        user = {"id": user_id, "email": email, "password": hash_password(password), "name": name, "role": role, "created_at": datetime.now().isoformat()}
+        user = User(
+            id=user_id, email=email,
+            password=hash_password(password),
+            name=name, role=role,
+            created_at=datetime.now().isoformat()
+        )
+        if role == "doctor":
+            user.specialization = data.get('specialization', '')
+            user.hospital       = data.get('hospital', '')
 
-        if role == "parent":
-            user["babies"] = []
-        elif role == "doctor":
-            user["specialization"] = data.get('specialization', '')
-            user["hospital"] = data.get('hospital', '')
+        db.session.add(user)
+        db.session.commit()
 
-        users_db[email] = user
         return jsonify({"success": True, "user": {"id": user_id, "email": email, "name": name, "role": role}})
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     try:
-        data = request.get_json()
-        email = data.get('email', '').lower().strip()
+        data     = request.get_json()
+        email    = data.get('email', '').lower().strip()
         password = data.get('password', '')
 
-        if email not in users_db:
+        user = User.query.filter_by(email=email).first()
+        if not user or user.password != hash_password(password):
             return jsonify({"error": "Invalid email or password"}), 401
 
-        user = users_db[email]
-        if user["password"] != hash_password(password):
-            return jsonify({"error": "Invalid email or password"}), 401
+        user_info = user.to_dict()
 
-        user_info = {k: v for k, v in user.items() if k != 'password'}
-        if user["role"] == "parent":
+        if user.role == "parent":
             baby_list = []
-            for baby_id in user.get("babies", []):
-                if baby_id in babies_db:
-                    baby = babies_db[baby_id].copy()
-                    baby["results"] = results_db.get(baby_id, [])
-                    baby_list.append(baby)
+            for baby in user.babies:
+                baby_data = baby.to_dict()
+                baby_data["results"] = [r.to_dict() for r in baby.results]
+                baby_list.append(baby_data)
             user_info["babies_data"] = baby_list
 
         return jsonify({"success": True, "user": user_info})
@@ -147,44 +244,63 @@ def login():
 # ============================================================
 # PARENT PORTAL
 # ============================================================
+
 @app.route('/api/parent/add-baby', methods=['POST'])
 def add_baby():
     try:
-        data = request.get_json()
+        data      = request.get_json()
         parent_id = data.get('parentId')
-        baby_name = data.get('name')
-        baby_id = f"b-{str(uuid.uuid4())[:8]}"
-        baby = {"id": baby_id, "name": baby_name, "parent_id": parent_id, "dob": data.get('dob', ''), "gender": data.get('gender', ''), "created_at": datetime.now().isoformat()}
-        babies_db[baby_id] = baby
+        baby_id   = f"b-{str(uuid.uuid4())[:8]}"
 
-        for email, user in users_db.items():
-            if user.get("id") == parent_id:
-                user.setdefault("babies", []).append(baby_id)
-                break
+        baby = Baby(
+            id=baby_id, name=data.get('name'),
+            parent_id=parent_id,
+            dob=data.get('dob', ''),
+            gender=data.get('gender', ''),
+            created_at=datetime.now().isoformat()
+        )
+        db.session.add(baby)
+        db.session.commit()
 
-        return jsonify({"success": True, "baby": baby})
+        return jsonify({"success": True, "baby": baby.to_dict()})
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/parent/save-result', methods=['POST'])
 def save_result():
     try:
-        data = request.get_json()
-        baby_id = data.get('babyId')
-        result_entry = {"id": f"r-{str(uuid.uuid4())[:8]}", "type": data.get('type'), "data": data.get('data'), "timestamp": datetime.now().isoformat()}
-        if baby_id not in results_db:
-            results_db[baby_id] = []
-        results_db[baby_id].append(result_entry)
-        return jsonify({"success": True, "result": result_entry})
+        data      = request.get_json()
+        baby_id   = data.get('babyId')
+        result_id = f"r-{str(uuid.uuid4())[:8]}"
+
+        result = Result(
+            id=result_id, baby_id=baby_id,
+            type=data.get('type'),
+            data=json.dumps(data.get('data', {})),
+            timestamp=datetime.now().isoformat()
+        )
+        db.session.add(result)
+        db.session.commit()
+
+        return jsonify({"success": True, "result": result.to_dict()})
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/parent/results/<baby_id>', methods=['GET'])
 def get_baby_results(baby_id):
     try:
-        return jsonify({"success": True, "baby": babies_db.get(baby_id, {}), "results": results_db.get(baby_id, [])})
+        baby = Baby.query.get(baby_id)
+        if not baby:
+            return jsonify({"success": True, "baby": {}, "results": []})
+        return jsonify({
+            "success": True,
+            "baby": baby.to_dict(),
+            "results": [r.to_dict() for r in baby.results]
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -192,20 +308,21 @@ def get_baby_results(baby_id):
 # ============================================================
 # DOCTOR PORTAL
 # ============================================================
+
 @app.route('/api/doctor/patients', methods=['POST'])
 def get_doctor_patients():
     try:
         patients = []
-        for baby_id, results in results_db.items():
-            if baby_id in babies_db:
-                baby = babies_db[baby_id].copy()
-                baby["results"] = results
-                for email, user in users_db.items():
-                    if user.get("id") == baby.get("parent_id"):
-                        baby["parent_name"] = user.get("name", "Unknown")
-                        baby["parent_email"] = email
-                        break
-                patients.append(baby)
+        babies = Baby.query.all()
+        for baby in babies:
+            if baby.results:
+                baby_data = baby.to_dict()
+                baby_data["results"] = [r.to_dict() for r in baby.results]
+                parent = User.query.get(baby.parent_id)
+                if parent:
+                    baby_data["parent_name"]  = parent.name
+                    baby_data["parent_email"] = parent.email
+                patients.append(baby_data)
         return jsonify({"success": True, "patients": patients})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -214,25 +331,41 @@ def get_doctor_patients():
 @app.route('/api/doctor/add-note', methods=['POST'])
 def add_doctor_note():
     try:
-        data = request.get_json()
+        data    = request.get_json()
         baby_id = data.get('babyId')
-        note = {"id": f"n-{str(uuid.uuid4())[:8]}", "type": "doctor_note", "data": {"doctor_id": data.get('doctorId'), "doctor_name": data.get('doctorName', 'Doctor'), "note": data.get('note'), "timestamp": datetime.now().isoformat()}, "timestamp": datetime.now().isoformat()}
-        if baby_id not in results_db:
-            results_db[baby_id] = []
-        results_db[baby_id].append(note)
-        return jsonify({"success": True, "note": note})
+        note_id = f"n-{str(uuid.uuid4())[:8]}"
+
+        note_data = {
+            "doctor_id":   data.get('doctorId'),
+            "doctor_name": data.get('doctorName', 'Doctor'),
+            "note":        data.get('note'),
+            "timestamp":   datetime.now().isoformat()
+        }
+
+        note = Result(
+            id=note_id, baby_id=baby_id,
+            type="doctor_note",
+            data=json.dumps(note_data),
+            timestamp=datetime.now().isoformat()
+        )
+        db.session.add(note)
+        db.session.commit()
+
+        return jsonify({"success": True, "note": note.to_dict()})
     except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 
 # ============================================================
 # DOCTOR DIRECTORY
 # ============================================================
+
 @app.route('/api/doctors/directory', methods=['GET'])
 def get_doctors_directory():
     try:
-        spec = request.args.get('specialization', '')
-        city = request.args.get('city', '')
+        spec     = request.args.get('specialization', '')
+        city     = request.args.get('city', '')
         filtered = doctors_directory
         if spec:
             filtered = [d for d in filtered if spec.lower() in d['specialization'].lower()]
@@ -246,11 +379,12 @@ def get_doctors_directory():
 # ============================================================
 # AI CHATBOT
 # ============================================================
+
 @app.route('/api/chatbot', methods=['POST'])
 def chatbot():
     try:
-        data = request.get_json()
-        user_message = data.get('message', '')
+        data                 = request.get_json()
+        user_message         = data.get('message', '')
         conversation_history = data.get('history', [])
 
         if not user_message:
@@ -278,9 +412,9 @@ Rules:
             role = "user" if msg.get("role") == "user" else "model"
             gemini_messages.append({"role": role, "parts": [msg.get("content", "")]})
 
-        chat = model.start_chat(history=gemini_messages if gemini_messages else [])
+        chat         = model.start_chat(history=gemini_messages if gemini_messages else [])
         full_message = f"{system_prompt}\n\nUser: {user_message}" if not gemini_messages else user_message
-        response = chat.send_message(full_message)
+        response     = chat.send_message(full_message)
 
         return jsonify({"success": True, "reply": response.text, "timestamp": datetime.now().isoformat()})
     except Exception as e:
@@ -291,6 +425,7 @@ Rules:
 # ============================================================
 # VIDEO ANALYSIS
 # ============================================================
+
 @app.route('/api/analyze/video', methods=['POST'])
 def analyze_video():
     try:
@@ -315,7 +450,7 @@ Analyze this video for: 1) Motor movements 2) Facial expressions 3) Eye-tracking
 Respond ONLY in JSON (no markdown): {"motor_analysis": {"score": <0-100>, "findings": "", "concerns": []}, "facial_analysis": {"score": <0-100>, "findings": "", "concerns": []}, "eye_tracking": {"score": <0-100>, "findings": "", "concerns": []}, "behavioral_indicators": {"score": <0-100>, "findings": "", "concerns": []}, "overall_video_score": <0-100>, "summary": ""}
 Score: 0-30=High Risk, 31-60=Moderate, 61-80=Low, 81-100=Typical"""
 
-        response = model.generate_content([prompt, video_file])
+        response      = model.generate_content([prompt, video_file])
         response_text = response.text.strip()
         if response_text.startswith("```"):
             response_text = response_text.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -332,12 +467,13 @@ Score: 0-30=High Risk, 31-60=Moderate, 61-80=Low, 81-100=Typical"""
 # ============================================================
 # AUDIO ANALYSIS
 # ============================================================
+
 @app.route('/api/analyze/audio', methods=['POST'])
 def analyze_audio():
     try:
         if 'audio' not in request.files:
             return jsonify({"error": "No audio file provided"}), 400
-        file = request.files['audio']
+        file     = request.files['audio']
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
@@ -351,7 +487,7 @@ def analyze_audio():
         prompt = """You are NeoMind. Analyze this infant audio for: 1) Cry patterns 2) Vocalizations 3) Atypical indicators.
 Respond ONLY in JSON (no markdown): {"cry_analysis": {"score": <0-100>, "pitch": "", "rhythm": "", "findings": "", "concerns": []}, "vocalization_patterns": {"score": <0-100>, "variety": "", "findings": "", "concerns": []}, "atypical_indicators": {"score": <0-100>, "findings": "", "concerns": []}, "overall_audio_score": <0-100>, "summary": ""}"""
 
-        response = model.generate_content([prompt, audio_file])
+        response      = model.generate_content([prompt, audio_file])
         response_text = response.text.strip()
         if response_text.startswith("```"):
             response_text = response_text.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -368,6 +504,7 @@ Respond ONLY in JSON (no markdown): {"cry_analysis": {"score": <0-100>, "pitch":
 # ============================================================
 # HEALTH DATA ANALYSIS
 # ============================================================
+
 @app.route('/api/analyze/health', methods=['POST'])
 def analyze_health():
     try:
@@ -386,7 +523,7 @@ Maternal age: {data.get('maternalAge','N/A')}, Prenatal issues: {data.get('prena
 Respond ONLY in JSON (no markdown):
 {{"risk_scores": {{"adhd": {{"score": <0-100>, "risk_level": "", "factors": []}}, "asd": {{"score": <0-100>, "risk_level": "", "factors": []}}, "down_syndrome": {{"score": <0-100>, "risk_level": "", "factors": []}}, "developmental_delay": {{"score": <0-100>, "risk_level": "", "factors": []}}}}, "overall_risk_score": <0-100>, "overall_risk_level": "", "key_findings": [], "recommendations": [], "follow_up": [], "summary": ""}}"""
 
-        response = model.generate_content(prompt)
+        response      = model.generate_content(prompt)
         response_text = response.text.strip()
         if response_text.startswith("```"):
             response_text = response_text.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -401,10 +538,11 @@ Respond ONLY in JSON (no markdown):
 # ============================================================
 # COMPREHENSIVE ASSESSMENT
 # ============================================================
+
 @app.route('/api/analyze/comprehensive', methods=['POST'])
 def comprehensive_assessment():
     try:
-        data = request.get_json()
+        data   = request.get_json()
         prompt = f"""You are NeoMind. Combine all results into a final assessment.
 Video: {json.dumps(data.get('videoAnalysis', {}))}
 Audio: {json.dumps(data.get('audioAnalysis', {}))}
@@ -413,7 +551,7 @@ Health: {json.dumps(data.get('healthAnalysis', {}))}
 Respond ONLY in JSON (no markdown):
 {{"comprehensive_scores": {{"adhd_risk": {{"score": <0-100>, "level": "", "confidence": <0-100>, "key_indicators": []}}, "asd_risk": {{"score": <0-100>, "level": "", "confidence": <0-100>, "key_indicators": []}}, "down_syndrome_risk": {{"score": <0-100>, "level": "", "confidence": <0-100>, "key_indicators": []}}, "developmental_delay_risk": {{"score": <0-100>, "level": "", "confidence": <0-100>, "key_indicators": []}}}}, "overall_assessment": {{"risk_score": <0-100>, "risk_level": "", "summary": ""}}, "intervention_plan": {{"immediate_actions": [], "short_term": [], "long_term": [], "therapy_suggestions": []}}, "medical_followup": {{"specialists": [], "tests": [], "timeline": ""}}, "disclaimer": "This is for screening only. Consult professionals."}}"""
 
-        response = model.generate_content(prompt)
+        response      = model.generate_content(prompt)
         response_text = response.text.strip()
         if response_text.startswith("```"):
             response_text = response_text.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -428,14 +566,20 @@ Respond ONLY in JSON (no markdown):
 # ============================================================
 # HEALTH CHECK
 # ============================================================
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "running", "service": "NeoMind AI Backend v2.0", "gemini_configured": GEMINI_API_KEY != "YOUR_API_KEY_HERE"})
+    return jsonify({
+        "status": "running",
+        "service": "NeoMind AI Backend v3.0",
+        "gemini_configured": GEMINI_API_KEY != "YOUR_API_KEY_HERE",
+        "database": "PostgreSQL (persistent)"
+    })
 
 
 if __name__ == '__main__':
     print("\n" + "="*60)
-    print("  NeoMind AI Backend Server v2.0")
+    print("  NeoMind AI Backend Server v3.0  (PostgreSQL)")
     print("="*60)
     if GEMINI_API_KEY == "YOUR_API_KEY_HERE":
         print("\n  WARNING: Set your Gemini API key!")
