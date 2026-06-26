@@ -2,9 +2,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Link, useLocation, useNavigate, Navigate } from 'react-router-dom';
 import axios from 'axios';
 import './App.css';
-
 const API_URL = 'https://neomind-oof5.onrender.com';
-
 const Icons = {
   Brain: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.58.7 3 1.8 4L12 21l6.2-9.5A5.49 5.49 0 0 0 20 7.5 5.5 5.5 0 0 0 14.5 2h-5Z"/><path d="M12 2v19"/><path d="M4.5 10h15"/></svg>,
   Video: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2"/></svg>,
